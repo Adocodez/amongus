@@ -1,0 +1,61 @@
+1️⃣ Make your frontend JS resilient to reconnects
+
+Wrap your fetch('/status') in try-catch.
+
+Reset previous states if the fetch fails (e.g., phone went offline).
+
+This ensures your page doesn’t freeze when the phone reconnects.
+
+Example modification for your main hall JS:
+
+async function refreshStatus(){
+    try {
+        let res = await fetch('/status');
+        if(!res.ok) throw "Fetch failed";
+        let data = await res.json();
+
+        // Reset states if major reconnect
+        if(!data.players || Object.keys(data.players).length === 0){
+            previousAliveState = {};
+            announcedDead = {};
+            winnerAnnounced = false;
+        }
+
+        // --- existing code for updating time, tasks, alerts, etc. ---
+        document.getElementById('time').innerText = data.time_remaining + "s";
+        document.getElementById('tasks').innerText = data.tasks_done + " / " + data.task_goal;
+        let aliveCount = Object.values(data.players).filter(p=>p.alive).length;
+        document.getElementById('alive-players').innerText = aliveCount + " / " + Object.keys(data.players).length;
+
+        // Handle deaths/ejections
+        for(let [rfid, p] of Object.entries(data.players)){
+            if(previousAliveState[rfid] === undefined) previousAliveState[rfid] = p.alive;
+            if(previousAliveState[rfid] && !p.alive && !announcedDead[rfid]){
+                announcedDead[rfid] = true;
+                const action = p.death_type;
+                setTimeout(()=>{ 
+                    speak(`${p.color} has been ${action}.`);
+                    showAlert(`${p.color} (${action.toUpperCase()})!`);
+                }, 5000);
+            }
+            previousAliveState[rfid] = p.alive;
+        }
+
+        // Winner announcement
+        if(data.game_state === "ended" && data.winner && !winnerAnnounced){
+            winnerAnnounced = true;
+            document.getElementById('winner-display').innerText = data.winner.toUpperCase() + " WINS!";
+            speak(data.winner.toUpperCase() + " wins!");
+        }
+
+    } catch(err){
+        console.log("Fetch failed or network disconnected, retrying...", err);
+        // Optionally, reset previous states after network reconnect
+        previousAliveState = {};
+        announcedDead = {};
+    }
+}
+
+// Refresh every second
+setInterval(refreshStatus, 1000);
+window.onload = refreshStatus;
