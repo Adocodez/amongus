@@ -13,7 +13,7 @@ win_announced = False
 # Game State
 # ------------------------------
 players = {}  # {rfid: {"color": str, "role": str, "alive": bool, "last_kill": datetime}}
-colors = ["Red", "Blue", "Green", "Yellow", "Orange", "Pink", "Purple", "Cyan", "White", "Black"]
+colors = ["Red", "Blue", "Green", "Yellow", "Orange", "Pink", "Purple", "Cyan", "White", "Lime"]
 
 game_state = "waiting"  # waiting / running / ended
 game_start_time = None
@@ -24,6 +24,7 @@ game_duration = 300  # 5 minutes
 task_goal = 6
 required_players = 10
 kill_cooldown = timedelta(seconds=75)  # 1.5 minutes
+impostor_kill_count = 0
 
 # ------------------------------
 # Meeting State
@@ -55,7 +56,7 @@ def assign_roles():
 
 def reset_game():
     """Resets the game to its initial waiting state."""
-    global players, game_state, total_tasks_done, game_start_time, game_winner, meeting_active, meeting_start_time
+    global players, game_state, total_tasks_done, game_start_time, game_winner, meeting_active, meeting_start_time, impostor_kill_count
     for rfid in players:
         players[rfid]["role"] = None
         players[rfid]["alive"] = True
@@ -66,9 +67,10 @@ def reset_game():
     game_winner = None
     meeting_active = False
     meeting_start_time = None
+    impostor_kill_count = 0
 
 def check_win_conditions():
-    global game_state, game_winner, win_announced
+    global game_state, game_winner, win_announced, impostor_kill_count
     if game_state != "running":
         return
 
@@ -76,13 +78,14 @@ def check_win_conditions():
     if game_winner == "jester":
         return
 
-    alive_crewmates = sum(1 for p in players.values() if p["alive"] and p["role"] == "crewmate")
+    alive_crewmates = sum(1 for p in players.values() if p["alive"] and p["role"] in ["crewmate", "jester"])
     alive_impostors = sum(1 for p in players.values() if p["alive"] and p["role"] == "impostor")
 
-    if total_tasks_done >= task_goal:
+    if total_tasks_done >= task_goal or alive_impostors == 0:
         game_state = "ended"
         game_winner = "crewmates"
-    elif alive_crewmates <= 2:
+    #elif alive_crewmates <= 2:
+    elif impostor_kill_count >= 5:
         game_state = "ended"
         game_winner = "impostors"
     elif game_start_time:
@@ -181,6 +184,10 @@ def kill(impostor: str, target: str):
     players[target]["alive"] = False
     players[target]["death_time"] = now
     players[impostor]["last_kill"] = now
+    players[target]["death_type"] = "killed"
+    global impostor_kill_count
+    impostor_kill_count += 1
+
 
     # Start meeting after delay
     def start_meeting():
@@ -353,13 +360,20 @@ async function refreshStatus(){
     document.getElementById('tasks-status').innerText = data.tasks_done + " / " + data.task_goal;
 
     // Handle deaths
-    for(let [rfid,p] of Object.entries(data.players)){
-        if(!p.alive && !alertedDead[rfid]){
-            alertedDead[rfid] = true;
-            showAlert(`${p.color} DIED!`);
-            blinkBackground(p.color);
+for(let [rfid,p] of Object.entries(data.players)){
+    if(!p.alive && !alertedDead[rfid]){
+        alertedDead[rfid] = true;
+
+        if(p.death_type === "killed"){
+            showAlert(`${p.color} (${rfid}) WAS KILLED!`);
+            blinkBackground(p.color); // blink only for kills
+        } else if(p.death_type === "ejected"){
+            showAlert(`${p.color} (${rfid}) WAS EJECTED!`);
+            // no blink for ejection
         }
     }
+}
+
 
     // Show alive players for selection
     let html = '';
@@ -463,13 +477,20 @@ async function refreshStatus(){
 
     document.getElementById('tasks-status').innerText = data.tasks_done + " / " + data.task_goal;
 
-    for(let [rfid,p] of Object.entries(data.players)){
-        if(!p.alive && !alertedDead[rfid]){
-            showAlert(`${p.color} (${rfid}) DIED!`);
-            alertedDead[rfid] = true;
-            blinkBackground(p.color); // <-- blink immediately
+for(let [rfid,p] of Object.entries(data.players)){
+    if(!p.alive && !alertedDead[rfid]){
+        alertedDead[rfid] = true;
+
+        if(p.death_type === "killed"){
+            showAlert(`${p.color} (${rfid}) WAS KILLED!`);
+            blinkBackground(p.color); // blink only on kill
+        } else if(p.death_type === "ejected"){
+            showAlert(`${p.color} (${rfid}) WAS EJECTED!`);
+            // ❌ no blink for ejection
         }
     }
+}
+
 }
 
 document.getElementById('complete-task-btn')?.addEventListener('click', async ()=>{
@@ -549,6 +570,19 @@ function showAlert(msg){
     setTimeout(()=>{ alertDiv.style.display='none'; }, 10000);
 }
 
+function blinkBackground(color){
+    const body = document.body;
+    let blink = true;
+    const intervalId = setInterval(() => {
+        body.style.backgroundColor = blink ? color : "#1a1a1a";
+        blink = !blink;
+    }, 500);
+    setTimeout(() => {
+        clearInterval(intervalId);
+        body.style.backgroundColor = "#1a1a1a";
+    }, 30000);
+}
+
 function resetForNewGame(){
     winnerAnnounced = false;
     meetingActive = false;
@@ -560,13 +594,13 @@ function resetForNewGame(){
     previousAliveState = {};
 }
 
-// Refresh status every second
+// Main refresh function
 async function refreshStatus(){
     let res = await fetch('/status');
     let data = await res.json();
 
-    // Reset for new game
-    if(data.game_state=="running" && winnerAnnounced && !data.winner){
+    // Reset for new game start
+    if(data.game_state === "running" && winnerAnnounced && !data.winner){
         resetForNewGame();
     }
 
@@ -576,18 +610,20 @@ async function refreshStatus(){
     let aliveCount = Object.values(data.players).filter(p=>p.alive).length;
     document.getElementById('alive-players').innerText = aliveCount + " / " + Object.keys(data.players).length;
 
-    // Handle kills & ejections with 5s delay
-    for(let [rfid,p] of Object.entries(data.players)){
+    // Handle kills/ejections with 5s TTS delay
+    for(let [rfid, p] of Object.entries(data.players)){
         if(previousAliveState[rfid] === undefined) previousAliveState[rfid] = p.alive;
 
         if(previousAliveState[rfid] && !p.alive && !announcedDead[rfid]){
             announcedDead[rfid] = true;
-            let action = p.death_type;
-            setTimeout(()=>{  // 5s delay
+            const action = p.death_type;
+            setTimeout(()=>{
                 speak(`${p.color} has been ${action}.`);
                 showAlert(`${p.color} (${action.toUpperCase()})!`);
+                //if(action === "killed") blinkBackground(p.color);
             }, 5000);
         }
+
         previousAliveState[rfid] = p.alive;
     }
 
@@ -596,50 +632,79 @@ async function refreshStatus(){
         winnerAnnounced = true;
         let winnerText = data.winner.toUpperCase();
         document.getElementById('winner-display').innerText = winnerText + " WINS!";
-        speak(winnerText + " wins!");
+        if(data.winner === "crewmates") speak("Game over, The Crewmates have won the game!");
+        else if(data.winner === "draw") speak("Draw!");
+        else speak(winnerText + " wins!");
+
+        // Stop any ongoing meeting intervals/TTS
+        if(meetingInterval) clearInterval(meetingInterval);
+        if(meetingTTSInterval) clearInterval(meetingTTSInterval);
+        meetingActive = false;
+        document.getElementById('meeting').style.display = 'none';
     }
 
-    // Meeting countdown 10 → 1 in 30s
-    if(data.meeting_remaining > 0){
+    // Meeting countdown 10→1 in 30s
+    if(data.meeting_remaining > 0 && !meetingActive && data.game_state === "running"){
+        meetingActive = true;
         document.getElementById('meeting').style.display = 'block';
         document.getElementById('meeting-count').innerText = data.meeting_remaining + "s left";
+        speak("Meeting started!");
+        showAlert("Meeting started!");
 
-        if(!meetingActive){
-            meetingActive = true;
-            speak('Meeting has started.');
 
-            let count = 10;
-            if(meetingTTSInterval) clearInterval(meetingTTSInterval);
-            meetingTTSInterval = setInterval(()=>{
+        let count = 10;
+
+        // TTS countdown
+        if(meetingTTSInterval) clearInterval(meetingTTSInterval);
+        meetingTTSInterval = setInterval(()=>{
+            fetch('/status').then(res=>res.json()).then(d=>{
+                if(d.game_state !== "running"){
+                    clearInterval(meetingTTSInterval);
+                    meetingActive = false;
+                    document.getElementById('meeting').style.display = 'none';
+                    return;
+                }
+
                 if(count > 0){
                     speak(count.toString());
                     count--;
                 } else {
                     speak("Meeting over");
                     clearInterval(meetingTTSInterval);
-                }
-            }, 2750); // 3s per number
-
-            if(meetingInterval) clearInterval(meetingInterval);
-            meetingInterval = setInterval(()=>{
-                let remaining = parseInt(document.getElementById('meeting-count').innerText);
-                if(remaining > 1){
-                    document.getElementById('meeting-count').innerText = (remaining-1) + "s left";
-                } else {
-                    document.getElementById('meeting').style.display = 'none';
                     meetingActive = false;
-                    clearInterval(meetingInterval);
+                    document.getElementById('meeting').style.display = 'none';
                 }
-            }, 1000);
-        }
+            });
+        }, 2750);
+
+        // Visual countdown
+        if(meetingInterval) clearInterval(meetingInterval);
+        meetingInterval = setInterval(()=>{
+            fetch('/status').then(res=>res.json()).then(d=>{
+                if(d.game_state !== "running"){
+                    clearInterval(meetingInterval);
+                    meetingActive = false;
+                    document.getElementById('meeting').style.display = 'none';
+                    return;
+                }
+                let remaining = parseInt(document.getElementById('meeting-count').innerText);
+                if(isNaN(remaining) || remaining <= 1){
+                    clearInterval(meetingInterval);
+                    meetingActive = false;
+                    document.getElementById('meeting').style.display = 'none';
+                } else {
+                    document.getElementById('meeting-count').innerText = (remaining-1) + "s left";
+                }
+            });
+        }, 1000);
     }
 }
 
-
-
+// Refresh every second
 setInterval(refreshStatus, 1000);
 window.onload = refreshStatus;
 </script>
+
 </body>
 </html>
 
@@ -695,6 +760,16 @@ async function refreshStatus(){
     let res = await fetch('/status'); 
     let data = await res.json();
 
+    // ----------------------------
+    // Stop meeting if game ended
+    // ----------------------------
+    if(data.game_state !== "running" && meetingCountdownRunning){
+        if(meetingTTSInterval) clearInterval(meetingTTSInterval);
+        if(meetingInterval) clearInterval(meetingInterval);
+        document.getElementById('meeting').style.display = 'none';
+        meetingCountdownRunning = false;
+    }
+
     document.getElementById('game-state').innerText = data.game_state.toUpperCase();
     document.getElementById('tasks').innerText = data.tasks_done + " / " + data.task_goal;
     document.getElementById('time').innerText = data.time_remaining;
@@ -729,6 +804,7 @@ async function refreshStatus(){
         else showAnnouncement(data.winner.toUpperCase()+" WINS!");
     }
 }
+
 
 setInterval(refreshStatus,1000);
 window.onload = refreshStatus;
