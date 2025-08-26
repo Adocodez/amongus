@@ -20,9 +20,9 @@ game_start_time = None
 game_winner = None  # None / "crewmates" / "impostors" / "jester" / "draw"
 
 # New Game Parameters
-game_duration = 300  # 5 minutes
+game_duration = 360  # 5 minutes
 task_goal = 6
-required_players = 10
+required_players = 6
 kill_cooldown = timedelta(seconds=75)  # 1.5 minutes
 impostor_kill_count = 0
 
@@ -31,7 +31,7 @@ impostor_kill_count = 0
 # ------------------------------
 meeting_active = False
 meeting_start_time = None
-meeting_duration = 30  # seconds
+meeting_duration = 50  # seconds
 meeting_delay = 6      # seconds after death
 
 # Tasks
@@ -111,7 +111,7 @@ async def connect_player(rfid: str, color: str):
 @app.post("/start")
 def start_game():
     global game_state, game_start_time
-    if len(players) != required_players:
+    if len(players) < required_players and len(players) > 10:
         return {"error": f"Need exactly {required_players} players to start."}
     reset_game()
     assign_roles()
@@ -675,7 +675,7 @@ async function refreshStatus(){
                     document.getElementById('meeting').style.display = 'none';
                 }
             });
-        }, 2750);
+        }, 4975);
 
         // Visual countdown
         if(meetingInterval) clearInterval(meetingInterval);
