@@ -5,9 +5,16 @@ from datetime import datetime, timedelta
 import uvicorn
 import random
 from threading import Timer
+import os
+
 
 app = FastAPI()
 win_announced = False
+#from fastapi.staticfiles import StaticFiles
+#static_path = os.path.join(os.path.dirname(__file__), "static")
+
+#app.mount("/static", StaticFiles(directory=static_path), name="static")
+
 
 # ------------------------------
 # Game State
@@ -20,9 +27,9 @@ game_start_time = None
 game_winner = None  # None / "crewmates" / "impostors" / "jester" / "draw"
 
 # New Game Parameters
-game_duration = 360  # 5 minutes
+game_duration = 600  # 5 minutes
 task_goal = 6
-required_players = 6
+required_players = 10
 kill_cooldown = timedelta(seconds=75)  # 1.5 minutes
 impostor_kill_count = 0
 
@@ -103,109 +110,6 @@ def check_win_conditions():
 # ------------------------------
 # API Endpoints
 # ------------------------------
-@app.get("/connect/{rfid}/{color}")
-async def connect_player(rfid: str, color: str):
-    players[rfid] = {"color": color, "role": "Crewmate", "alive": True, "last_kill": datetime.min}
-    return {"status": "connected", "rfid": rfid, "color": color}
-
-@app.post("/start")
-def start_game():
-    global game_state, game_start_time
-    if len(players) < required_players and len(players) > 10:
-        return {"error": f"Need exactly {required_players} players to start."}
-    reset_game()
-    assign_roles()
-    game_state = "running"
-    game_start_time = datetime.now()
-    return {"status": "game started"}
-
-@app.post("/reset")
-def reset():
-    reset_game()
-    return {"status": "game reset"}
-
-from fastapi.encoders import jsonable_encoder
-
-@app.get("/status")
-def status():
-    global meeting_active, meeting_start_time
-    check_win_conditions()
-
-    remaining_time = 0
-    if game_state == "running" and game_start_time:
-        elapsed = (datetime.now() - game_start_time).total_seconds()
-        remaining_time = max(0, game_duration - int(elapsed))
-
-    # Meeting countdown
-    meeting_remaining = 0
-    if meeting_active and meeting_start_time:
-        elapsed = (datetime.now() - meeting_start_time).total_seconds()
-        meeting_remaining = max(0, meeting_duration - int(elapsed))
-        if meeting_remaining == 0:
-            meeting_active = False
-            meeting_start_time = None
-
-    for p in players.values():
-        if not p["alive"]:
-            p["death_type"] = p.get("death_type", "killed")
-
-    return {
-        "game_state": game_state,
-        "time_remaining": remaining_time,
-        "players": jsonable_encoder(players),
-        "tasks_done": total_tasks_done,
-        "task_goal": task_goal,
-        "winner": game_winner if game_state == "ended" else None,
-        "meeting_remaining": meeting_remaining
-    }
-
-
-@app.post("/kill/{impostor}/{target}")
-def kill(impostor: str, target: str):
-    global meeting_active, meeting_start_time
-    if game_state != "running":
-        return {"error": "Game not running"}
-    if impostor not in players or target not in players:
-        return {"error": "Invalid player RFID"}
-    if players[impostor]["role"] != "impostor":
-        return {"error": "Not an impostor"}
-    if not players[impostor]["alive"]:
-        return {"error": "Dead impostors cannot kill"}
-    if players[target]["role"] == "impostor":
-        return {"error": "Cannot kill a fellow impostor"}
-    if not players[target]["alive"]:
-        return {"error": "Target already dead"}
-
-    now = datetime.now()
-    if now - players[impostor]["last_kill"] < kill_cooldown:
-        cooldown_left = kill_cooldown - (now - players[impostor]["last_kill"])
-        return {"error": f"Kill cooldown active. {int(cooldown_left.total_seconds())}s remaining."}
-
-    players[target]["alive"] = False
-    players[target]["death_time"] = now
-    players[impostor]["last_kill"] = now
-    players[target]["death_type"] = "killed"
-    global impostor_kill_count
-    impostor_kill_count += 1
-
-
-    # Start meeting after delay
-    def start_meeting():
-        global meeting_active, meeting_start_time
-        if game_state =='running':
-            meeting_active = True
-            meeting_start_time = datetime.now()
-
-    Timer(meeting_delay, start_meeting).start()
-    
-    check_win_conditions()
-    return {
-        "status": f"{players[target]['color']} was killed.",
-        "death_type": "killed",
-        "winner": game_winner if game_state=="ended" else None
-}
-
-
 
 @app.post("/eject/{rfid}")
 def eject(rfid: str):
@@ -233,6 +137,131 @@ def eject(rfid: str):
         "status": f"{players[rfid]['color']} has been ejected",
         "winner": game_winner if game_state=="ended" else None,
         "death_type": "ejected"
+    }
+
+
+@app.get("/connect/{rfid}/{color}")
+async def connect_player(rfid: str, color: str):
+    if rfid not in players:
+        players[rfid] = {"color": color, "role": "Crewmate", "alive": True, "last_kill": datetime.min}
+    return {"status": "connected", "rfid": rfid, "color": color}
+
+@app.post("/start")
+def start_game():
+    global game_state, game_start_time
+    if len(players) > required_players :
+        return {"error": f"Need exactly {required_players} players to start."}
+    #reset_game()
+    #assign_roles()
+    game_state = "running"
+    game_start_time = datetime.now()
+    return {"status": "game started"}
+
+@app.post("/reset")
+def reset():
+    reset_game()
+    assign_roles()
+    return {"status": "game reset"}
+
+from fastapi.encoders import jsonable_encoder
+
+@app.get("/status")
+def status():
+    global meeting_active, meeting_start_time
+    check_win_conditions()
+
+    remaining_time = 0
+    if game_state == "running" and game_start_time:
+        elapsed = (datetime.now() - game_start_time).total_seconds()
+        remaining_time = max(0, game_duration - int(elapsed))
+
+    # Meeting countdown
+    meeting_remaining = 0
+    meeting_countdown_tick = None
+    if meeting_active and meeting_start_time:
+        elapsed = (datetime.now() - meeting_start_time).total_seconds()
+        meeting_remaining = max(0, meeting_duration - int(elapsed))
+
+        # 🔥 server-based countdown (10→1 every ~5s)
+        if meeting_remaining > 0:
+            tick = int((meeting_duration - meeting_remaining) // 5)  # every 5s
+            meeting_countdown_tick = max(10 - tick, 0)
+
+        if meeting_remaining == 0:
+            meeting_active = False
+            meeting_start_time = None
+
+    for p in players.values():
+        if not p["alive"]:
+            p["death_type"] = p.get("death_type", "killed")
+
+    return {
+        "game_state": game_state,
+        "time_remaining": remaining_time,
+        "players": jsonable_encoder(players),
+        "tasks_done": total_tasks_done,
+        "task_goal": task_goal,
+        "winner": game_winner if game_state == "ended" else None,
+        "meeting_remaining": meeting_remaining,
+        "meeting_countdown": meeting_countdown_tick,  # 👈 NEW
+        "pre_meeting_alert": pre_meeting_alert  # 🔹 frontend uses this
+    }
+
+from threading import Timer
+
+meeting_timer = None   # add this at the top with your globals
+meeting_delay = 6      # 5s delay before meeting starts
+pre_meeting_alert= False
+@app.post("/kill/{impostor}/{target}")
+def kill(impostor: str, target: str):
+    global meeting_active, meeting_start_time, meeting_timer, pre_meeting_alert
+    if game_state != "running":
+        return {"error": "Game not running"}
+    if impostor not in players or target not in players:
+        return {"error": "Invalid player RFID"}
+    if players[impostor]["role"] != "impostor":
+        return {"error": "Not an impostor"}
+    if not players[impostor]["alive"]:
+        return {"error": "Dead impostors cannot kill"}
+    if players[target]["role"] == "impostor":
+        return {"error": "Cannot kill a fellow impostor"}
+    if not players[target]["alive"]:
+        return {"error": "Target already dead"}
+
+    now = datetime.now()
+    if now - players[impostor]["last_kill"] < kill_cooldown:
+        cooldown_left = kill_cooldown - (now - players[impostor]["last_kill"])
+        return {"error": f"Kill cooldown active. {int(cooldown_left.total_seconds())}s remaining."}
+
+    # mark victim dead
+    players[target]["alive"] = False
+    players[target]["death_time"] = now
+    players[target]["death_type"] = "killed"
+
+    # update impostor kill info
+    players[impostor]["last_kill"] = now
+    global impostor_kill_count
+    impostor_kill_count += 1
+    pre_meeting_alert=True
+
+    # Schedule meeting only if no meeting is already pending
+    if meeting_timer is None:
+        def start_meeting():
+            global meeting_active, meeting_start_time, meeting_timer
+            if game_state == 'running':
+                pre_meeting_alert = False
+                meeting_active = True
+                meeting_start_time = datetime.now()
+            meeting_timer = None  # reset so future kills can trigger again
+
+        meeting_timer = Timer(meeting_delay, start_meeting)
+        meeting_timer.start()
+
+    check_win_conditions()
+    return {
+        "status": f"{players[target]['color']} was killed.",
+        "death_type": "killed",
+        "winner": game_winner if game_state == "ended" else None
     }
 
 
@@ -273,6 +302,10 @@ def set_eject(rfid: str = Form(...)):
     global pending_eject_rfid
     if not meeting_active:
         return {"error": "Meeting not active, cannot set eject."}
+    if rfid =="":
+        pending_eject_rfid=None
+        return {"status": "Eject selection cleared"}
+
     if rfid not in players or not players[rfid]["alive"]:
         return {"error": "Invalid or dead player"}
     pending_eject_rfid = rfid
@@ -298,6 +331,7 @@ def process_eject():
         return {"status": f"{players[rfid]['color']} ejected after meeting"}
     return {"status": "No eject selected"}
 
+
 @app.get("/special-logistics", response_class=HTMLResponse)
 def special_logistics_page():
     return """
@@ -306,11 +340,13 @@ def special_logistics_page():
 <title>Special Logistics Panel</title>
 <style>
 body { font-family: Arial; text-align:center; margin-top:50px; background-color:#222; color:white; }
-button { font-size:1.5em; padding:10px 30px; margin:5px; cursor:pointer; }
+button { font-size:1.5em; padding:10px 30px; margin:5px; cursor:pointer; border-radius:10px; }
 #alert { font-size:2em; color:red; display:none; margin-top:20px; }
 #tasks-status { font-size:1.5em; margin-top:20px; }
-.player-btn { display:inline-block; margin:5px; padding:10px; border-radius:5px; font-size:1em; }
+.player-dead { display:block; margin:8px; padding:10px; border-radius:5px; font-size:1.2em; color:red; text-decoration: line-through; background:#444; }
+.player-btn { display:inline-block; margin:8px; padding:15px 30px; background:#333; color:white; border:none; }
 .selected { border: 3px solid yellow; }
+.section { margin-top:30px; }
 </style>
 </head>
 <body>
@@ -319,8 +355,15 @@ button { font-size:1.5em; padding:10px 30px; margin:5px; cursor:pointer; }
 <button id="complete-task-btn">Complete Task</button>
 <p>Current Tasks Completed: <span id="tasks-status">-</span></p>
 
-<h2>Players Alive:</h2>
-<div id="players-list"></div>
+<div class="section">
+<h2>Alive Players (Ejectable)</h2>
+<div id="alive-list"></div>
+</div>
+
+<div class="section">
+<h2>Dead Players</h2>
+<div id="dead-list"></div>
+</div>
 
 <div id="alert"></div>
 
@@ -349,7 +392,7 @@ function blinkBackground(color){
         clearInterval(flashIntervals[color]);
         body.style.backgroundColor = "#222";
         delete flashIntervals[color];
-    }, 30000);
+    }, 13000);
 }
 
 // Refresh status
@@ -360,30 +403,37 @@ async function refreshStatus(){
     document.getElementById('tasks-status').innerText = data.tasks_done + " / " + data.task_goal;
 
     // Handle deaths
-for(let [rfid,p] of Object.entries(data.players)){
-    if(!p.alive && !alertedDead[rfid]){
-        alertedDead[rfid] = true;
+    for(let [rfid,p] of Object.entries(data.players)){
+        if(!p.alive && !alertedDead[rfid]){
+            alertedDead[rfid] = true;
 
-        if(p.death_type === "killed"){
-            showAlert(`${p.color} (${rfid}) WAS KILLED!`);
-            blinkBackground(p.color); // blink only for kills
-        } else if(p.death_type === "ejected"){
-            showAlert(`${p.color} (${rfid}) WAS EJECTED!`);
-            // no blink for ejection
+            if(p.death_type === "killed"){
+                showAlert(`${p.color} WAS KILLED!`);
+                blinkBackground(p.color); // blink only for kills
+            } else if(p.death_type === "ejected"){
+                showAlert(`${p.color} WAS EJECTED!`);
+            }
         }
     }
-}
 
-
-    // Show alive players for selection
-    let html = '';
+    // Show alive players as eject buttons
+    let aliveHtml = '';
     for(let [rfid,p] of Object.entries(data.players)){
         if(p.alive){
             let cls = (pendingEject===rfid) ? 'selected' : '';
-            html += `<button class="player-btn ${cls}" onclick="selectEject('${rfid}')">${p.color}</button>`;
+            aliveHtml += `<button class="player-btn ${cls}" onclick="selectEject('${rfid}')">${p.color}</button>`;
         }
     }
-    document.getElementById('players-list').innerHTML = html;
+    document.getElementById('alive-list').innerHTML = aliveHtml || "<p>No alive players</p>";
+
+    // Show dead players with cause
+    let deadHtml = '';
+    for(let [rfid,p] of Object.entries(data.players)){
+        if(!p.alive){
+            deadHtml += `<div class="player-dead">${p.color} - ${p.death_type.toUpperCase()}</div>`;
+        }
+    }
+    document.getElementById('dead-list').innerHTML = deadHtml || "<p>No deaths yet</p>";
 
     // Auto eject after meeting ends
     if(data.meeting_remaining===0 && pendingEject){
@@ -392,13 +442,21 @@ for(let [rfid,p] of Object.entries(data.players)){
     }
 }
 
-// Select who to eject
+// Select/unselect eject
 async function selectEject(rfid){
-    pendingEject = rfid;
-    await fetch('/special-logistics/set_eject', {
-        method:'POST',
-        body: new URLSearchParams({'rfid': rfid})
-    });
+    if(pendingEject === rfid){
+        pendingEject = null;
+        await fetch('/special-logistics/set_eject', {
+            method:'POST',
+            body: new URLSearchParams({'rfid': ''})  // clear selection
+        });
+    } else {
+        pendingEject = rfid;
+        await fetch('/special-logistics/set_eject', {
+            method:'POST',
+            body: new URLSearchParams({'rfid': rfid})
+        });
+    }
     refreshStatus();
 }
 
@@ -406,6 +464,7 @@ async function selectEject(rfid){
 document.getElementById('complete-task-btn').addEventListener('click', async ()=>{
     await fetch('/logistics/complete_task', {method:'POST'});
     await refreshStatus();
+    showAlert("Task complete!");
 });
 
 setInterval(refreshStatus, 1000);
@@ -414,7 +473,6 @@ window.onload = refreshStatus;
 </body>
 </html>
 """
-
 
 
 
@@ -432,6 +490,8 @@ body { font-family: Arial; text-align:center; margin-top:50px; background-color:
 button { font-size:2em; padding:20px 40px; margin:5px; cursor:pointer; }
 #alert { font-size:2em; color:red; display:none; margin-top:20px; }
 #tasks-status { font-size:1.5em; margin-top:20px; }
+#players-list { margin-top:30px; font-size:1.5em; }
+.dead { color:red; text-decoration: line-through; }
 </style>
 </head>
 <body>
@@ -439,6 +499,9 @@ button { font-size:2em; padding:20px 40px; margin:5px; cursor:pointer; }
 <button id="complete-task-btn">Mark ONE Task as Done</button>
 <p>Current Tasks Completed: <span id="tasks-status">-</span></p>
 <div id="alert"></div>
+
+<h2>Dead Players</h2>
+<div id="players-list"></div>
 
 <script>
 let alertedDead = {};
@@ -451,24 +514,19 @@ function showAlert(msg){
     setTimeout(()=>{ alertDiv.style.display='none'; }, 10000);
 }
 
-// Blink background in color of dead player
 function blinkBackground(color){
     const body = document.body;
     let blink = true;
-
-    if(flashIntervals[color]) clearInterval(flashIntervals[color]); // clear if already blinking
-
+    if(flashIntervals[color]) clearInterval(flashIntervals[color]);
     flashIntervals[color] = setInterval(() => {
         body.style.backgroundColor = blink ? color : "#222";
         blink = !blink;
-    }, 500); // toggle every 0.5s
-
-    // Stop blinking after 30s and reset
+    }, 500);
     setTimeout(() => {
         clearInterval(flashIntervals[color]);
         body.style.backgroundColor = "#222";
         delete flashIntervals[color];
-    }, 30000);
+    }, 13000);
 }
 
 async function refreshStatus(){
@@ -477,34 +535,42 @@ async function refreshStatus(){
 
     document.getElementById('tasks-status').innerText = data.tasks_done + " / " + data.task_goal;
 
-for(let [rfid,p] of Object.entries(data.players)){
-    if(!p.alive && !alertedDead[rfid]){
-        alertedDead[rfid] = true;
-
-        if(p.death_type === "killed"){
-            showAlert(`${p.color} (${rfid}) WAS KILLED!`);
-            blinkBackground(p.color); // blink only on kill
-        } else if(p.death_type === "ejected"){
-            showAlert(`${p.color} (${rfid}) WAS EJECTED!`);
-            // ❌ no blink for ejection
+    // Show ONLY dead players
+    let html = "";
+    for(let [rfid,p] of Object.entries(data.players)){
+        if(!p.alive){
+            html += `<p class="dead">${p.color} (${rfid}) - ${p.death_type.toUpperCase()}</p>`;
         }
     }
-}
+    document.getElementById('players-list').innerHTML = html || "<p>No deaths yet</p>";
 
+    // Death alerts
+    for(let [rfid,p] of Object.entries(data.players)){
+        if(!p.alive && !alertedDead[rfid]){
+            alertedDead[rfid] = true;
+            if(p.death_type === "killed"){
+                showAlert(`${p.color} (${rfid}) WAS KILLED!`);
+                blinkBackground(p.color);
+            } else if(p.death_type === "ejected"){
+                showAlert(`${p.color} (${rfid}) WAS EJECTED!`);
+            }
+        }
+    }
 }
 
 document.getElementById('complete-task-btn')?.addEventListener('click', async ()=>{
     await fetch('/logistics/complete_task', {method:'POST'});
     await refreshStatus();
+    showAlert("Task complete!");
 });
 
 setInterval(refreshStatus, 1000);
 window.onload = refreshStatus;
 </script>
 
-
 </body>
 </html>
+
 """
 
 
@@ -554,7 +620,16 @@ let winnerAnnounced = false;
 let meetingActive = false;
 let meetingInterval = null;
 let meetingTTSInterval = null;
-
+let lastTick=null;
+//let audio = new Audio("/static/incorrect-buzzer-sound-147336.mp3");
+//audio.load();
+/*document.addEventListener("click", () => {
+    audio.play().then(() => {
+        audio.pause();
+        audio.currentTime = 0;
+    }).catch(err => console.log("Autoplay unlock failed", err));
+}, {once: true});
+*/
 function speak(msg){
     if('speechSynthesis' in window){
         const utter = new SpeechSynthesisUtterance(msg);
@@ -642,62 +717,59 @@ async function refreshStatus(){
         meetingActive = false;
         document.getElementById('meeting').style.display = 'none';
     }
+/*if (data.pre_meeting_alert && !meetingActive) {
+    // wait 5s AFTER kill before beep sequence starts
+    setTimeout(() => {
+        let beepCount = 0;
+
+        function playBeep(){
+            //audio.currentTime = 0;
+            //audio.play().then(() => {
+                beepCount++;
+                if (beepCount < 3) {
+                   // audio.onended = playBeep;  // chain next beep
+                }
+            }).catch(err => console.log("Play blocked:", err));
+        }
+
+        //playBeep();
+    }, 5000);
+}
+*/
+
 
     // Meeting countdown 10→1 in 30s
-    if(data.meeting_remaining > 0 && !meetingActive && data.game_state === "running"){
+if (data.meeting_remaining > 0 && data.game_state=="running") {
+    // Show meeting UI
+    document.getElementById('meeting').style.display = 'block';
+    document.getElementById('meeting-count').innerText = data.meeting_remaining + "s left";
+
+    // Speak once at the start
+    if (!meetingActive) {
         meetingActive = true;
-        document.getElementById('meeting').style.display = 'block';
-        document.getElementById('meeting-count').innerText = data.meeting_remaining + "s left";
         speak("Meeting started!");
         showAlert("Meeting started!");
-
-
-        let count = 10;
-
-        // TTS countdown
-        if(meetingTTSInterval) clearInterval(meetingTTSInterval);
-        meetingTTSInterval = setInterval(()=>{
-            fetch('/status').then(res=>res.json()).then(d=>{
-                if(d.game_state !== "running"){
-                    clearInterval(meetingTTSInterval);
-                    meetingActive = false;
-                    document.getElementById('meeting').style.display = 'none';
-                    return;
-                }
-
-                if(count > 0){
-                    speak(count.toString());
-                    count--;
-                } else {
-                    speak("Meeting over");
-                    clearInterval(meetingTTSInterval);
-                    meetingActive = false;
-                    document.getElementById('meeting').style.display = 'none';
-                }
-            });
-        }, 4975);
-
-        // Visual countdown
-        if(meetingInterval) clearInterval(meetingInterval);
-        meetingInterval = setInterval(()=>{
-            fetch('/status').then(res=>res.json()).then(d=>{
-                if(d.game_state !== "running"){
-                    clearInterval(meetingInterval);
-                    meetingActive = false;
-                    document.getElementById('meeting').style.display = 'none';
-                    return;
-                }
-                let remaining = parseInt(document.getElementById('meeting-count').innerText);
-                if(isNaN(remaining) || remaining <= 1){
-                    clearInterval(meetingInterval);
-                    meetingActive = false;
-                    document.getElementById('meeting').style.display = 'none';
-                } else {
-                    document.getElementById('meeting-count').innerText = (remaining-1) + "s left";
-                }
-            });
-        }, 1000);
     }
+
+    // Server-driven TTS countdown
+    if (data.meeting_countdown !== null && data.meeting_countdown !== lastTick) {
+        lastTick = data.meeting_countdown;
+        if (lastTick > 0) {
+            speak(lastTick.toString());
+        } else {
+            speak("Meeting over");
+        }
+    }
+} else {
+    // Meeting ended
+    if (meetingActive) {
+        speak("Meeting over");
+    }
+    document.getElementById('meeting').style.display = 'none';
+    meetingActive = false;
+    lastTick = null;
+}
+
 }
 
 // Refresh every second
